@@ -47,11 +47,17 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine__TokenAddressesAndPriceFeedAddressMustBeSameLength();
     error DSCEngine__TokenNotUsedForCollateral();
     error DSCEngine__TransferFailed();
-    error DSCEngine__HealthFactorIsLessThanOne();
+    error DSCEngine__BreakHealthFactor(uint256 userHealthFactor);
 
     ///////////////////////
     /// State Variables ///
     ///////////////////////
+    uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
+    uint256 private constant PRECISION = 1e18;
+    uint8 private constant LIQUIDATION_THRESHOLD = 50;
+    uint8 private constant LIQUIDATION_PRECISION = 100;
+    uint8 private constant MIN_HEALTH_FACTOR = 1;
+
     mapping(address token => address priceFeed) private s_priceFeeds;
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
     mapping(address user => uint256 amountDscMinted) private s_DSCMinted;
@@ -137,37 +143,74 @@ contract DSCEngine is ReentrancyGuard {
 
     function liquidate() external {}
 
-    /**
-     *
-     * @dev return how close to liquidation a user is. If HealthFactor < 1, they can get liquidated.
-     */
-    function getHealthFactor(address user) public returns (uint256) {
-        (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformationUser(user);
-    }
-
     //////////////////////////////////////
     /// Internal and Private Functions ///
     //////////////////////////////////////
-    function _revertIfHealthFactorIsBroken(address user) internal {
-        if (getHealthFactor(user) < 1) revert DSCEngine__HealthFactorIsLessThanOne();
+
+    ///////////////////////////////////////////
+    /// Internal and Private view Functions ///
+    ///////////////////////////////////////////
+
+    /**
+     * 
+     * @param user address of the user
+     * @dev does not allow mint DSC if Healthfactor <1
+     */
+    function _revertIfHealthFactorIsBroken(address user) internal view {
+        uint256 userHealthFactor = getHealthFactor(user);
+        if (userHealthFactor < MIN_HEALTH_FACTOR) revert DSCEngine__BreakHealthFactor(userHealthFactor);
     }
 
     //////////////////////////////////////////
-    /// Public and External view Functions ///
+    /// External and Public view Functions ///
     //////////////////////////////////////////
 
-    function _getAccountInformationUser(address user) public view returns (uint256, uint256) {
+    /**
+     *
+     * @param user address of the user
+     * @dev return how close to liquidation a user is. If HealthFactor < 1, they can get liquidated.
+     * need %200 overcollateralized
+     */
+    function getHealthFactor(address user) public view returns (uint256) {
+        (uint256 totalDscMinted, uint256 collateralValueInUsd) = getAccountInformationUser(user);
+        uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
+
+        return (collateralAdjustedForThreshold * PRECISION) / totalDscMinted;
+    }
+
+    /**
+     *
+     * @param user address of the user
+     * @return totalDscMinted total of DSC tokens minted by the user
+     * @return collateralValueInUsd USD value of the user's collateral in the contract
+     */
+    function getAccountInformationUser(address user) public view returns (uint256, uint256) {
         uint256 totalDscMinted = s_DSCMinted[user];
         uint256 collateralValueInUsd = 0;
 
         for (uint256 i = 0; i < s_collateralTokens.length; i++) {
             address token = s_collateralTokens[i];
             uint256 amount = s_collateralDeposited[user][token];
-            address value = s_priceFeeds[token];
+            collateralValueInUsd += getUsdValue(token, amount);
         }
 
         return (totalDscMinted, collateralValueInUsd);
     }
 
-    function getUsdValue(address token, uint256 value) public returns (uint256) {}
+    /**
+     *
+     * @param token token contract address
+     * @param amount amount of tokens
+     * @dev Chainlink is used to get the current price of the token
+     */
+    function getUsdValue(address token, uint256 amount) public view returns (uint256) {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(s_priceFeeds[token]);
+
+        //1ETH = $1000
+        //returned value will be 1000 * 1e8
+        (, int256 price,,,) = priceFeed.latestRoundData();
+
+        //(1000 * 1e8 * 1e10) / 1e18
+        return ((uint256(price) * ADDITIONAL_FEED_PRECISION) * amount) / PRECISION;
+    }
 }
