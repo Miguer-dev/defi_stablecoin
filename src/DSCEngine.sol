@@ -48,6 +48,7 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine__TokenNotUsedForCollateral();
     error DSCEngine__TransferFailed();
     error DSCEngine__BreakHealthFactor(uint256 userHealthFactor);
+    error DSCEngine__MintFailed();
 
     ///////////////////////
     /// State Variables ///
@@ -120,24 +121,25 @@ contract DSCEngine is ReentrancyGuard {
         emit CollateralDeposited(msg.sender, tokenCollateralAddress, amountCollateral);
 
         bool success = IERC20(tokenCollateralAddress).transferFrom(msg.sender, address(this), amountCollateral);
-        if (!success) {
-            revert DSCEngine__TransferFailed();
-        }
+        if (!success) revert DSCEngine__TransferFailed();
     }
-
-    function redeemCollateralForDsc() external {}
-
-    function redeemCollateral() external {}
 
     /**
      *
      * @param amountDscToMint Amount of DSC to mint
      */
-    function mintDsc(uint256 amountDscToMint) external {
+    function mintDsc(uint256 amountDscToMint) external MoreThanZero(amountDscToMint) nonReentrant {
         s_DSCMinted[msg.sender] += amountDscToMint;
         _revertIfHealthFactorIsBroken(msg.sender);
         emit DSCMinted(msg.sender, amountDscToMint);
+
+        bool minted = i_dscToken.mint(msg.sender, amountDscToMint);
+        if (!minted) revert DSCEngine__MintFailed();
     }
+
+    function redeemCollateralForDsc() external {}
+
+    function redeemCollateral() external {}
 
     function burnDsc() external {}
 
@@ -152,7 +154,7 @@ contract DSCEngine is ReentrancyGuard {
     ///////////////////////////////////////////
 
     /**
-     * 
+     *
      * @param user address of the user
      * @dev does not allow mint DSC if Healthfactor <1
      */
